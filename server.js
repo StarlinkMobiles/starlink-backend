@@ -23,7 +23,7 @@ const PORT = process.env.PORT || 5000;
 app.post("/api/runPrompt", async (req, res) => {
   console.log("Incoming payment:", req.body);
 
-  const { phone, amount, local_id, transaction_desc } = req.body;
+  const { phone, amount, local_id, transaction_desc, till_id } = req.body;
 
   if (!phone || !amount || !local_id) {
     return res.status(400).json({ status: false, msg: "Missing required fields" });
@@ -34,12 +34,22 @@ app.post("/api/runPrompt", async (req, res) => {
     formattedPhone = "254" + phone.slice(1);
   }
 
+  // 🔥 Select API Key (default remains the original one)
+  let selectedApiKey = process.env.NESTLINK_API_KEY;
+
+  if (till_id) {
+    const dynamicKey = process.env[`NESTLINK_KEY_${till_id}`];
+    if (dynamicKey) {
+      selectedApiKey = dynamicKey;
+    }
+  }
+
   try {
     const nestRes = await fetch("https://api.nestlink.co.ke/runPrompt", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Api-Secret": process.env.NESTLINK_API_KEY,
+        "Api-Secret": selectedApiKey,
       },
       body: JSON.stringify({
         phone: formattedPhone,
