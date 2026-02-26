@@ -9,14 +9,13 @@ const app = express();
 
 app.use(
   cors({
-    origin: [
-      "http://localhost:3000",
-      "https://starlink-beta-jet.vercel.app",
-    ],
+    origin: true,   // ✅ allow all domains dynamically
+    credentials: true,
   })
 );
 
 app.use(express.json());
+
 
 const PORT = process.env.PORT || 5000;
 
