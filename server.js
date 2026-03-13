@@ -80,8 +80,7 @@ app.post("/api/runPrompt", async (req, res) => {
        Timeout protection
     -----------------------------------*/
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
-
+const timeout = setTimeout(() => controller.abort(), 90000);
     const nestRes = await fetch("https://api.nestlink.co.ke/runPrompt", {
       method: "POST",
       headers: {
