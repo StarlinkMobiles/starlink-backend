@@ -19,14 +19,14 @@ app.use(express.json());
 const PORT = process.env.PORT || 5000;
 
 /* ----------------------------------
-   Health route (for ping services)
+   Health route
 -----------------------------------*/
 app.get("/", (req, res) => {
-  res.send("Backend alive");
+  res.send("Backend alive (SmartPay)");
 });
 
 /* ----------------------------------
-   Payment endpoint
+   Payment endpoint (SmartPay)
 -----------------------------------*/
 app.post("/api/runPrompt", async (req, res) => {
   console.log("Incoming payment:", req.body);
@@ -34,9 +34,10 @@ app.post("/api/runPrompt", async (req, res) => {
   const { phone, amount, local_id, transaction_desc, till_id } = req.body;
 
   if (!phone || !amount || !local_id) {
-    return res
-      .status(400)
-      .json({ status: false, msg: "Missing required fields" });
+    return res.status(400).json({
+      status: false,
+      msg: "Missing required fields",
+    });
   }
 
   /* ----------------------------------
@@ -56,19 +57,19 @@ app.post("/api/runPrompt", async (req, res) => {
   }
 
   /* ----------------------------------
-     Select API key
+     Select API key (SmartPay)
   -----------------------------------*/
-  let selectedApiKey = process.env.NESTLINK_API_KEY;
+  let selectedApiKey = process.env.SMARTPAY_API_KEY;
 
   if (till_id) {
-    const dynamicKey = process.env[`NESTLINK_KEY_${till_id}`];
+    const dynamicKey = process.env[`SMARTPAY_KEY_${till_id}`];
     if (dynamicKey) {
       selectedApiKey = dynamicKey;
     }
   }
 
   if (!selectedApiKey) {
-    console.error("Missing Nestlink API key");
+    console.error("Missing SmartPay API key");
     return res.status(500).json({
       status: false,
       msg: "Server configuration error",
@@ -80,44 +81,54 @@ app.post("/api/runPrompt", async (req, res) => {
        Timeout protection
     -----------------------------------*/
     const controller = new AbortController();
-const timeout = setTimeout(() => controller.abort(), 90000);
-    const nestRes = await fetch("https://api.nestlink.co.ke/runPrompt", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Api-Secret": selectedApiKey,
-      },
-      body: JSON.stringify({
-        phone: formattedPhone,
-        amount,
-        local_id,
-        transaction_desc,
-      }),
-      signal: controller.signal,
-    });
+    const timeout = setTimeout(() => controller.abort(), 90000);
+
+    const smartRes = await fetch(
+      "https://api.smartpaypesa.com/v1/stk/push",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${selectedApiKey}`,
+        },
+        body: JSON.stringify({
+          phone: formattedPhone,
+          amount: Number(amount),
+          account_reference: local_id, // 🔥 maps from your old system
+          description: transaction_desc || "Payment",
+        }),
+        signal: controller.signal,
+      }
+    );
 
     clearTimeout(timeout);
 
-    if (!nestRes.ok) {
-      const text = await nestRes.text();
+    const rawText = await smartRes.text();
 
-      console.error("NestLink STATUS:", nestRes.status);
-      console.error("NestLink RESPONSE:", text);
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      data = { raw: rawText };
+    }
+
+    if (!smartRes.ok || !data.success) {
+      console.error("SmartPay ERROR:", data);
 
       return res.status(500).json({
         status: false,
-        msg: "NestLink request failed",
-        code: nestRes.status,
-        raw: text || "empty response",
+        msg: data.message || "SmartPay request failed",
+        error: data.error_code || "UNKNOWN_ERROR",
+        raw: data,
       });
     }
 
-    const data = await nestRes.json();
-    console.log("NestLink response:", data);
+    console.log("SmartPay response:", data);
 
     return res.json({
-      status: data.status,
-      msg: data.status ? "STK Push sent" : "Payment failed",
+      status: true,
+      msg: "STK Push sent",
+      checkout_request_id: data.checkout_request_id,
       data,
     });
   } catch (err) {
@@ -126,7 +137,7 @@ const timeout = setTimeout(() => controller.abort(), 90000);
     if (err.name === "AbortError") {
       return res.status(500).json({
         status: false,
-        msg: "Request timeout contacting Nestlink",
+        msg: "Request timeout contacting SmartPay",
       });
     }
 
@@ -136,6 +147,24 @@ const timeout = setTimeout(() => controller.abort(), 90000);
       error: err.message,
     });
   }
+});
+
+/* ----------------------------------
+   OPTIONAL: Webhook endpoint
+-----------------------------------*/
+app.post("/api/smartpay-callback", (req, res) => {
+  console.log("SmartPay CALLBACK:", JSON.stringify(req.body, null, 2));
+
+  const callback =
+    req.body?.Body?.stkCallback;
+
+  if (callback?.ResultCode === 0) {
+    console.log("✅ Payment SUCCESS");
+  } else {
+    console.log("❌ Payment FAILED:", callback?.ResultDesc);
+  }
+
+  res.sendStatus(200);
 });
 
 /* ----------------------------------
