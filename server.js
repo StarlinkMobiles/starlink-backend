@@ -178,6 +178,33 @@ process.on("unhandledRejection", (err) => {
   console.error("Unhandled Rejection:", err);
 });
 
+app.get("/api/status/:checkoutId", async (req, res) => {
+  try {
+    const response = await fetch(
+      `https://api.smartpaypesa.com/v1/transactions/${req.params.checkoutId}`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${process.env.SMARTPAY_API_KEY}`,
+        },
+      }
+    );
+
+    const data = await response.json();
+
+    console.log("Transaction Status:", data);
+
+    res.json(data);
+  } catch (err) {
+    console.error(err);
+
+    res.status(500).json({
+      success: false,
+      message: "Unable to check transaction",
+    });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Backend running on port ${PORT}`);
 });
