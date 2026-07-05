@@ -18,6 +18,12 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 5000;
 
+/* ==================================
+   IN-MEMORY SAFETY LAYERS
+================================== */
+const activeTransactions = new Map(); // prevents duplicate STKs
+const statusThrottle = new Map();     // prevents API spam
+
 /* ----------------------------------
    Health route
 -----------------------------------*/
@@ -26,7 +32,7 @@ app.get("/", (req, res) => {
 });
 
 /* ----------------------------------
-   Payment endpoint (SmartPay)
+   PAYMENT ENDPOINT (SAFE VERSION)
 -----------------------------------*/
 app.post("/api/runPrompt", async (req, res) => {
   console.log("Incoming payment:", req.body);
@@ -39,6 +45,19 @@ app.post("/api/runPrompt", async (req, res) => {
       msg: "Missing required fields",
     });
   }
+
+  /* ----------------------------------
+     DEDUPLICATION (PREVENT DOUBLE STK)
+  -----------------------------------*/
+  if (activeTransactions.has(local_id)) {
+    return res.status(429).json({
+      status: false,
+      msg: "Duplicate transaction blocked",
+      error: "DUPLICATE_REQUEST",
+    });
+  }
+
+  activeTransactions.set(local_id, Date.now());
 
   /* ----------------------------------
      Phone normalization
@@ -77,9 +96,6 @@ app.post("/api/runPrompt", async (req, res) => {
   }
 
   try {
-    /* ----------------------------------
-       Timeout protection
-    -----------------------------------*/
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 90000);
 
@@ -94,7 +110,7 @@ app.post("/api/runPrompt", async (req, res) => {
         body: JSON.stringify({
           phone: formattedPhone,
           amount: Number(amount),
-          account_reference: local_id, // 🔥 maps from your old system
+          account_reference: local_id,
           description: transaction_desc || "Payment",
         }),
         signal: controller.signal,
@@ -112,8 +128,27 @@ app.post("/api/runPrompt", async (req, res) => {
       data = { raw: rawText };
     }
 
+    /* ----------------------------------
+       SMARTPAY ERROR HANDLING FIX
+    -----------------------------------*/
     if (!smartRes.ok || !data.success) {
       console.error("SmartPay ERROR:", data);
+
+      if (data.error_code === "LIMIT_REACHED") {
+        return res.status(429).json({
+          status: false,
+          msg: "Too many requests. Please wait.",
+          error: "LIMIT_REACHED",
+        });
+      }
+
+      if (data.error_code === "FRAUD_BLOCK_FAILURE_RATE") {
+        return res.status(403).json({
+          status: false,
+          msg: "Temporarily blocked due to high failure rate.",
+          error: "FRAUD_BLOCK",
+        });
+      }
 
       return res.status(500).json({
         status: false,
@@ -131,6 +166,7 @@ app.post("/api/runPrompt", async (req, res) => {
       checkout_request_id: data.checkout_request_id,
       data,
     });
+
   } catch (err) {
     console.error("Server error:", err);
 
@@ -150,13 +186,12 @@ app.post("/api/runPrompt", async (req, res) => {
 });
 
 /* ----------------------------------
-   OPTIONAL: Webhook endpoint
+   OPTIONAL CALLBACK
 -----------------------------------*/
 app.post("/api/smartpay-callback", (req, res) => {
   console.log("SmartPay CALLBACK:", JSON.stringify(req.body, null, 2));
 
-  const callback =
-    req.body?.Body?.stkCallback;
+  const callback = req.body?.Body?.stkCallback;
 
   if (callback?.ResultCode === 0) {
     console.log("✅ Payment SUCCESS");
@@ -168,20 +203,27 @@ app.post("/api/smartpay-callback", (req, res) => {
 });
 
 /* ----------------------------------
-   Crash protection
+   STATUS ENDPOINT (RATE LIMITED)
 -----------------------------------*/
-process.on("uncaughtException", (err) => {
-  console.error("Uncaught Exception:", err);
-});
-
-process.on("unhandledRejection", (err) => {
-  console.error("Unhandled Rejection:", err);
-});
-
 app.get("/api/status/:checkoutId", async (req, res) => {
+  const id = req.params.checkoutId;
+  const now = Date.now();
+
+  const last = statusThrottle.get(id);
+
+  // prevent spam polling
+  if (last && now - last < 5000) {
+    return res.status(429).json({
+      success: false,
+      message: "Too many status requests",
+    });
+  }
+
+  statusThrottle.set(id, now);
+
   try {
     const response = await fetch(
-      `https://api.smartpaypesa.com/v1/transactions/${req.params.checkoutId}`,
+      `https://api.smartpaypesa.com/v1/transactions/${id}`,
       {
         method: "GET",
         headers: {
@@ -203,6 +245,30 @@ app.get("/api/status/:checkoutId", async (req, res) => {
       message: "Unable to check transaction",
     });
   }
+});
+
+/* ----------------------------------
+   CLEANUP OLD TRANSACTIONS
+-----------------------------------*/
+setInterval(() => {
+  const now = Date.now();
+
+  for (const [key, time] of activeTransactions.entries()) {
+    if (now - time > 10 * 60 * 1000) {
+      activeTransactions.delete(key);
+    }
+  }
+}, 60 * 1000);
+
+/* ----------------------------------
+   Crash protection
+-----------------------------------*/
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
+});
+
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled Rejection:", err);
 });
 
 app.listen(PORT, () => {
